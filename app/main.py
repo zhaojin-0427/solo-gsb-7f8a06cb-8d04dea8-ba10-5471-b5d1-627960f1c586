@@ -1,4 +1,5 @@
-"""FastAPI 应用入口：POST /rt60 上传单声道 16 位 PCM WAV，返回 RT60 测量结果。"""
+"""FastAPI 应用入口：POST /rt60、POST /clarity 上传单声道 16 位 PCM WAV，
+分别返回 RT60 混响时间与分频带语音清晰度 C50。"""
 
 from __future__ import annotations
 
@@ -8,6 +9,7 @@ import wave
 import numpy as np
 from fastapi import FastAPI, File, HTTPException, UploadFile
 
+from .clarity import measure_clarity
 from .rt60 import (
     ALLOWED_SAMPLE_RATES,
     MAX_DURATION_S,
@@ -22,12 +24,23 @@ MAX_UPLOAD_BYTES = 2_000_000
 app = FastAPI(
     title="RT60 混响时间测量",
     version="1.0.0",
-    description="上传单声道 16 位 PCM WAV（16 或 48 kHz，1～10 秒），测量房间脉冲响应的 RT60。",
+    description="上传单声道 16 位 PCM WAV（16 或 48 kHz，1～10 秒），测量房间脉冲响应的 "
+    "RT60 与分频带语音清晰度 C50。",
 )
 
 
 def _unprocessable(detail: str) -> HTTPException:
     return HTTPException(status_code=422, detail=detail)
+
+
+async def _read_upload(file: UploadFile) -> tuple[np.ndarray, int]:
+    """读取上传内容并完成 WAV 校验，返回 (int16 采样数组, 采样率)。"""
+    data = await file.read()
+    if not data:
+        raise _unprocessable("上传内容为空")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise _unprocessable("文件过大")
+    return _load_mono_pcm16_wav(data)
 
 
 def _load_mono_pcm16_wav(data: bytes) -> tuple[np.ndarray, int]:
@@ -62,13 +75,7 @@ def _load_mono_pcm16_wav(data: bytes) -> tuple[np.ndarray, int]:
 
 @app.post("/rt60")
 async def rt60(file: UploadFile = File(...)):
-    data = await file.read()
-    if not data:
-        raise _unprocessable("上传内容为空")
-    if len(data) > MAX_UPLOAD_BYTES:
-        raise _unprocessable("文件过大")
-
-    samples, sample_rate = _load_mono_pcm16_wav(data)
+    samples, sample_rate = await _read_upload(file)
 
     try:
         result = measure_rt60(samples, sample_rate)
@@ -76,3 +83,10 @@ async def rt60(file: UploadFile = File(...)):
         return {"measurable": False, "reason": str(exc)}
 
     return {"measurable": True, **result}
+
+
+@app.post("/clarity")
+async def clarity(file: UploadFile = File(...)):
+    """分频带语音清晰度 C50：单带不可测只影响该带，上传校验与 /rt60 相同。"""
+    samples, sample_rate = await _read_upload(file)
+    return measure_clarity(samples, sample_rate)

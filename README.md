@@ -1,6 +1,6 @@
 # RT60 混响时间测量 API
 
-基于 FastAPI + NumPy 的本地服务：上传单声道 16 位 PCM WAV 房间脉冲响应录音，返回 RT60 混响时间及各关键时刻。
+基于 FastAPI + NumPy/SciPy 的本地服务：上传单声道 16 位 PCM WAV 房间脉冲响应录音，返回 RT60 混响时间及各关键时刻，或返回四个倍频程带的语音清晰度 C50。
 
 ## 快速启动
 
@@ -78,7 +78,65 @@ curl -X POST http://localhost:8000/rt60 -F "file=@impulse.wav"
 
 **格式或范围错误**（`422`）：非 WAV 文件、非单声道、非 16 位 PCM、采样率不为 16/48 kHz、时长超出 1～10 秒、文件为空或过大、缺少上传字段。
 
-## 测量算法
+### `POST /clarity`
+
+上传方式与输入约束同 `/rt60`，返回各频带的语音清晰度 **C50**：
+
+```bash
+curl -X POST http://localhost:8000/clarity -F "file=@impulse.wav"
+```
+
+**测量成功**（`200`）：
+
+```json
+{
+  "start_time": 0.00625,
+  "bands": [
+    {"measurable": true, "frequency_hz": 500,  "c50_db": 6.12,  "tail_time": 0.82},
+    {"measurable": true, "frequency_hz": 1000, "c50_db": 5.48,  "tail_time": 0.74},
+    {"measurable": true, "frequency_hz": 2000, "c50_db": 4.91,  "tail_time": 0.66},
+    {"measurable": true, "frequency_hz": 4000, "c50_db": 3.05,  "tail_time": 0.58}
+  ]
+}
+```
+
+- `start_time`：**原始波形绝对峰值**位置（秒），作为所有频带共同的直达声起点，不按滤波后峰值重新对齐
+- `bands`：按中心频率**升序**（500、1000、2000、4000 Hz）排列的倍频程带结果
+- `c50_db`：该带清晰度 C50，单位 **dB**，`C50 = 10·log10(早期能量 / 晚期能量)`
+- `tail_time`：该带独立判定的有效尾端（秒）
+
+**单带不可测**时仅该带返回原因，其余频带照常测量：
+
+```json
+{
+  "start_time": 0.0,
+  "bands": [
+    {"measurable": false, "frequency_hz": 500,  "reason": "尾端不超过早期/晚期 50 毫秒分界"},
+    {"measurable": true,  "frequency_hz": 1000, "c50_db": 5.48, "tail_time": 0.74},
+    {"measurable": true,  "frequency_hz": 2000, "c50_db": 4.91, "tail_time": 0.66},
+    {"measurable": false, "frequency_hz": 4000, "reason": "带内峰值不高于四倍噪声 RMS，信噪比不足"}
+  ]
+}
+```
+
+可能的单带 `reason`：
+
+- `带内峰值不高于四倍噪声 RMS，信噪比不足`
+- `尾端不超过早期/晚期 50 毫秒分界`
+- `早期能量为零`
+- `晚期能量为零`
+
+`/clarity` 的格式或范围错误同样返回 `422`（与 `/rt60` 完全相同的校验）。
+
+## C50 测量算法
+
+1. 以**原始波形绝对峰值**位置作为所有频带**共同的直达声起点**（滤波后不再重新对齐）。
+2. 对中心频率 **500 / 1000 / 2000 / 4000 Hz** 的倍频程带（上下截止频率分别为中心频率 **/√2** 与 **×√2**），分别用 **SciPy 四阶 Butterworth SOS 零相位**带通（`butter(..., output="sos")` + `sosfiltfilt`）滤波。
+3. 每带用滤波后**末尾 20% 样本**估计噪声功率；从共同起点起按 **20 ms 完整帧**扫描，首次出现**连续三帧** RMS 均不高于**两倍噪声 RMS** 时，以首帧起点为**本带尾端**，否则取录音终点；**噪声为零**时也取录音终点。尾端**每带独立判定，不共用宽带尾端**。
+4. 每带对起点至尾端的样本计算 `max(样本平方 − 噪声功率, 0)`，以起点后 **50 ms** 为界分成早期与晚期能量（**边界采样归晚期**），`C50 = 10·log10(早期能量 / 晚期能量)` dB。
+5. 以下任一条件成立时仅该带判为不可测：从共同起点到录音终点的带内峰值 **≤ 4 倍噪声 RMS**；尾端 **不超过 50 ms 分界**；早期或晚期能量为零。
+
+## RT60 测量算法
 
 1. 以录音**绝对峰值**位置为测量起点。
 2. 用**末尾 20% 样本**估计噪声均方功率。
@@ -91,14 +149,16 @@ curl -X POST http://localhost:8000/rt60 -F "file=@impulse.wav"
 
 ```
 app/
-  main.py      # FastAPI 入口：上传校验（422）与响应
-  rt60.py      # 核心测量算法（NumPy）
+  main.py      # FastAPI 入口：上传校验（422）与响应（/rt60、/clarity）
+  rt60.py      # RT60 核心测量算法（NumPy）
+  clarity.py   # 分频带 C50 核心测量算法（NumPy + SciPy）
 tests/
-  test_api.py  # 接口测试（约束校验、响应格式）
-  test_rt60.py # 算法测试（合成信号验证各分支）
+  test_api.py     # 接口测试（约束校验、响应格式）
+  test_rt60.py    # RT60 算法测试（合成信号验证各分支）
+  test_clarity.py # C50 算法测试（分频带测量与各失败分支）
 Dockerfile
 docker-compose.yml
-requirements.txt       # 运行依赖
+requirements.txt       # 运行依赖（含 SciPy）
 requirements-dev.txt   # 测试依赖
 ```
 

@@ -62,7 +62,7 @@ def measure_rt60(samples: np.ndarray, sample_rate: int) -> dict:
     if noise_power == 0.0:
         tail_idx = n
     else:
-        tail_idx = _find_tail(x, peak_idx, noise_rms, sample_rate)
+        tail_idx = find_tail(x, peak_idx, noise_rms, sample_rate)
 
     # 5. 有效区间不得短于 100 ms
     if (tail_idx - peak_idx) < MIN_INTERVAL_S * sample_rate:
@@ -95,7 +95,7 @@ def measure_rt60(samples: np.ndarray, sample_rate: int) -> dict:
     }
 
 
-def _find_tail(x: np.ndarray, peak_idx: int, noise_rms: float, sample_rate: int) -> int:
+def find_tail(x: np.ndarray, peak_idx: int, noise_rms: float, sample_rate: int) -> int:
     """从峰值起按 20 ms 帧扫描，返回有效尾端采样索引（不含）。"""
     n = x.size
     frame = int(round(FRAME_S * sample_rate))

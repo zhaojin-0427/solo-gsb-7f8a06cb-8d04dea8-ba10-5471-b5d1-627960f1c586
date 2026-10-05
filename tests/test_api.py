@@ -36,8 +36,21 @@ def decaying_ir(fs: int, duration: float = 3.0, t60: float = 1.0) -> np.ndarray:
     return signal + rng.normal(0.0, 1e-4 * FULL_SCALE, n)
 
 
+def decaying_noise_ir(fs: int, duration: float = 3.0, t60: float = 0.5) -> np.ndarray:
+    """衰减白噪声脉冲响应（频谱平坦，各倍频程带均有能量）。"""
+    rng = np.random.default_rng(0)
+    n = int(fs * duration)
+    t = np.arange(n) / fs
+    ir = rng.normal(0.0, 0.5 * FULL_SCALE, n) * 10.0 ** (-3.0 * t / t60)
+    return ir + rng.normal(0.0, 1e-4 * FULL_SCALE, n)
+
+
 def post_wav(data: bytes, filename: str = "ir.wav"):
     return client.post("/rt60", files={"file": (filename, data, "audio/wav")})
+
+
+def post_clarity(data: bytes, filename: str = "ir.wav"):
+    return client.post("/clarity", files={"file": (filename, data, "audio/wav")})
 
 
 def test_valid_wav_returns_rt60():
@@ -99,4 +112,67 @@ def test_duration_out_of_range_returns_422(duration):
 
 def test_missing_file_returns_422():
     resp = client.post("/rt60")
+    assert resp.status_code == 422
+
+
+def test_clarity_valid_wav_returns_bands():
+    resp = post_clarity(make_wav(decaying_noise_ir(48000), 48000))
+    assert resp.status_code == 200
+    bands = resp.json()["bands"]
+    assert [b["center_hz"] for b in bands] == [500, 1000, 2000, 4000]
+    for b in bands:
+        assert b["measurable"] is True
+        assert isinstance(b["c50"], float)
+
+
+def test_clarity_valid_wav_16k():
+    resp = post_clarity(make_wav(decaying_noise_ir(16000, duration=2.0), 16000))
+    assert resp.status_code == 200
+    assert all(b["measurable"] for b in resp.json()["bands"])
+
+
+def test_clarity_unmeasurable_band_returns_reason_without_c50():
+    resp = post_clarity(make_wav(np.zeros(48000), 48000))
+    assert resp.status_code == 200
+    bands = resp.json()["bands"]
+    assert len(bands) == 4
+    for b in bands:
+        assert b["measurable"] is False
+        assert b["reason"]
+        assert "c50" not in b
+
+
+def test_clarity_non_wav_returns_422():
+    resp = post_clarity(b"this is not a wav file")
+    assert resp.status_code == 422
+
+
+def test_clarity_stereo_returns_422():
+    mono = decaying_noise_ir(48000)
+    stereo = np.repeat(mono, 2)  # 交错成双声道
+    resp = post_clarity(make_wav(stereo, 48000, channels=2))
+    assert resp.status_code == 422
+
+
+def test_clarity_8bit_returns_422():
+    samples = np.full(48000, 128, dtype=np.uint8)
+    resp = post_clarity(make_wav(samples, 48000, sampwidth=1))
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("fs", [8000, 44100])
+def test_clarity_unsupported_sample_rate_returns_422(fs):
+    resp = post_clarity(make_wav(decaying_noise_ir(fs, duration=2.0), fs))
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("duration", [0.5, 10.5])
+def test_clarity_duration_out_of_range_returns_422(duration):
+    fs = 16000
+    resp = post_clarity(make_wav(decaying_noise_ir(fs, duration=duration), fs))
+    assert resp.status_code == 422
+
+
+def test_clarity_missing_file_returns_422():
+    resp = client.post("/clarity")
     assert resp.status_code == 422
